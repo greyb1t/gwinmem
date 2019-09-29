@@ -424,32 +424,32 @@ void gwinmem::ProcessMemory::ManualMapper::RelocateImage(
       nt_headers->OptionalHeader
           .DataDirectory[ IMAGE_DIRECTORY_ENTRY_BASERELOC ];
 
-  IMAGE_BASE_RELOCATION* reloc_chunk_data =
+  IMAGE_BASE_RELOCATION* reloc_block =
       reinterpret_cast<IMAGE_BASE_RELOCATION*>(
           data +
           RvaToFileOffset( nt_headers, reloc_directory.VirtualAddress ) );
 
-  DWORD reloc_block_offset = 0;
+  DWORD relocation_size_read = 0;
 
   // TODO: Consider converting this to a for loop due to the reloc_block_offset
   // usage
-  while ( reloc_block_offset < reloc_directory.Size ) {
-    DWORD reloc_block_count =
-        ( reloc_chunk_data->SizeOfBlock - sizeof( IMAGE_BASE_RELOCATION ) ) /
+  while ( relocation_size_read < reloc_directory.Size ) {
+    DWORD reloc_list_count =
+        ( reloc_block->SizeOfBlock - sizeof( IMAGE_BASE_RELOCATION ) ) /
         sizeof( WORD );
 
-    WORD* reloc_chunk =
-        reinterpret_cast<WORD*>( reinterpret_cast<size_t>( reloc_chunk_data ) +
+    WORD* reloc_list =
+        reinterpret_cast<WORD*>( reinterpret_cast<size_t>( reloc_block ) +
                                  sizeof( IMAGE_BASE_RELOCATION ) );
 
-    for ( size_t i = 0; i < reloc_block_count; ++i ) {
+    for ( size_t i = 0; i < reloc_list_count; ++i ) {
       // Mask out the type and assign
-      const WORD type = reloc_chunk[ i ] >> 12;
+      const WORD type = reloc_list[ i ] >> 12;
 
       // Mask out the offset and assign
-      const WORD offset = reloc_chunk[ i ] & 0xfff;
+      const WORD offset = reloc_list[ i ] & 0xfff;
 
-      const uintptr_t rva = offset + reloc_chunk_data->VirtualAddress;
+      const uintptr_t rva = offset + reloc_block->VirtualAddress;
 
       const uintptr_t file_offset = RvaToFileOffset( nt_headers, rva );
 
@@ -461,11 +461,11 @@ void gwinmem::ProcessMemory::ManualMapper::RelocateImage(
       }
     }
 
-    reloc_block_offset += reloc_chunk_data->SizeOfBlock;
+    relocation_size_read += reloc_block->SizeOfBlock;
 
-    reloc_chunk_data = reinterpret_cast<IMAGE_BASE_RELOCATION*>(
-        reinterpret_cast<size_t>( reloc_chunk_data ) +
-        reloc_chunk_data->SizeOfBlock );
+    reloc_block = reinterpret_cast<IMAGE_BASE_RELOCATION*>(
+        reinterpret_cast<size_t>( reloc_block ) +
+        reloc_block->SizeOfBlock );
   }
 }
 
