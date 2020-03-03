@@ -34,9 +34,11 @@ gwinmem::PEB* gwinmem::ProcessMemoryInternal::GetCurrentPeb() const {
   return reinterpret_cast<PEB*>( peb_addr );
 }
 
-void ThrowBadMemoryException() {
+void ThrowBadMemoryException( const uintptr_t address, const uint64_t size ) {
   throw gwinmem::BadMemoryException(
-      "ReadBytes failed, it is most likely you who read invalid memory." );
+      "ReadBytes failed, it is most likely you who read invalid memory. "
+      "Address: " +
+      std::to_string( address ) + ", Size: " + std::to_string( size ) );
 }
 
 bool gwinmem::ProcessMemoryInternal::ReadBytes( const uintptr_t address,
@@ -48,7 +50,7 @@ bool gwinmem::ProcessMemoryInternal::ReadBytes( const uintptr_t address,
   } __except ( GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION ) {
     // Assert here because we should not allow any reading to memory to fail.
     // That implies incorrect programming practices or bugs.
-    ThrowBadMemoryException();
+    ThrowBadMemoryException( address, size );
     return false;
   }
 

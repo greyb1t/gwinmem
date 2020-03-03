@@ -187,10 +187,25 @@ uintptr_t gwinmem::ProcessMemory::ReadPointersUntilLastOffset(
     const std::vector<uint32_t>& offsets ) {
   auto pointer = Read<uintptr_t>( address );
 
+  if ( pointer == 0 ) {
+    throw gwinmem::BadMemoryException(
+        "ReadBytes read a null value, it is most likely you who read invalid "
+        "memory. Address: " +
+        std::to_string( address ) );
+  }
+
   const uint32_t last_offset_index = offsets.empty() ? 0 : offsets.size() - 1;
 
-  for ( uint32_t i = 0; i < last_offset_index; ++i )
+  for ( uint32_t i = 0; i < last_offset_index; ++i ) {
     pointer = Read<uintptr_t>( pointer + offsets[ i ] );
+
+    if ( pointer == 0 ) {
+      throw gwinmem::BadMemoryException(
+          "ReadBytes read a null value, it is most likely you who read invalid "
+          "memory. Address: " +
+          std::to_string( address ) );
+    }
+  }
 
   return pointer + offsets.back();
 }
@@ -232,38 +247,40 @@ void LoadManualMappedDll( const MANUAL_MAPPING_DATA* mm_data ) {
   const auto import_directory =
       nt_headers->OptionalHeader.DataDirectory[ IMAGE_DIRECTORY_ENTRY_IMPORT ];
 
-  const IMAGE_IMPORT_DESCRIPTOR* import_desc =
-      reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(
-          data + import_directory.VirtualAddress );
-
-  // For each import descriptor
-  for ( auto import_desc = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(
+  if ( import_directory.Size ) {
+    const IMAGE_IMPORT_DESCRIPTOR* import_desc =
+        reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(
             data + import_directory.VirtualAddress );
-        import_desc->Name; ++import_desc ) {
-    const auto dll_name =
-        reinterpret_cast<const char*>( data + import_desc->Name );
 
-    const HINSTANCE dll_instance = mm_data->load_library( dll_name );
+    // For each import descriptor
+    for ( auto import_desc = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(
+              data + import_directory.VirtualAddress );
+          import_desc->Name; ++import_desc ) {
+      const auto dll_name =
+          reinterpret_cast<const char*>( data + import_desc->Name );
 
-    auto original_thunk = reinterpret_cast<IMAGE_THUNK_DATA*>(
-        data + import_desc->OriginalFirstThunk );
-    auto first_thunk =
-        reinterpret_cast<IMAGE_THUNK_DATA*>( data + import_desc->FirstThunk );
+      const HINSTANCE dll_instance = mm_data->load_library( dll_name );
 
-    // For each import thunk
-    for ( ; original_thunk->u1.AddressOfData;
-          ++original_thunk, ++first_thunk ) {
-      if ( IMAGE_SNAP_BY_ORDINAL( original_thunk->u1.Ordinal ) ) {
-        *reinterpret_cast<uintptr_t*>( first_thunk ) =
-            reinterpret_cast<uintptr_t>( mm_data->get_proc_address(
-                dll_instance, reinterpret_cast<char*>(
-                                  original_thunk->u1.Ordinal & 0xFFFF ) ) );
-      } else {
-        const auto import = reinterpret_cast<IMAGE_IMPORT_BY_NAME*>(
-            data + original_thunk->u1.AddressOfData );
-        *reinterpret_cast<uintptr_t*>( first_thunk ) =
-            reinterpret_cast<uintptr_t>(
-                mm_data->get_proc_address( dll_instance, import->Name ) );
+      auto original_thunk = reinterpret_cast<IMAGE_THUNK_DATA*>(
+          data + import_desc->OriginalFirstThunk );
+      auto first_thunk =
+          reinterpret_cast<IMAGE_THUNK_DATA*>( data + import_desc->FirstThunk );
+
+      // For each import thunk
+      for ( ; original_thunk->u1.AddressOfData;
+            ++original_thunk, ++first_thunk ) {
+        if ( IMAGE_SNAP_BY_ORDINAL( original_thunk->u1.Ordinal ) ) {
+          *reinterpret_cast<uintptr_t*>( first_thunk ) =
+              reinterpret_cast<uintptr_t>( mm_data->get_proc_address(
+                  dll_instance, reinterpret_cast<char*>(
+                                    original_thunk->u1.Ordinal & 0xFFFF ) ) );
+        } else {
+          const auto import = reinterpret_cast<IMAGE_IMPORT_BY_NAME*>(
+              data + original_thunk->u1.AddressOfData );
+          *reinterpret_cast<uintptr_t*>( first_thunk ) =
+              reinterpret_cast<uintptr_t>(
+                  mm_data->get_proc_address( dll_instance, import->Name ) );
+        }
       }
     }
   }
@@ -311,6 +328,9 @@ uintptr_t gwinmem::ProcessMemory::ManualMapper::ManualMapDll(
   // Is it a valid PE?
   if ( !nt_headers )
     return 0;
+
+  // TODO: Read the ntheaders of the target process and compare them to the dll we are about to manual map
+  // We need to make sure they are of the same bitness
 
   const uintptr_t alloc_address = process_memory.Allocate(
       0, nt_headers->OptionalHeader.SizeOfImage, MEM_COMMIT | MEM_RESERVE,
@@ -424,10 +444,8 @@ void gwinmem::ProcessMemory::ManualMapper::RelocateImage(
       nt_headers->OptionalHeader
           .DataDirectory[ IMAGE_DIRECTORY_ENTRY_BASERELOC ];
 
-  IMAGE_BASE_RELOCATION* reloc_block =
-      reinterpret_cast<IMAGE_BASE_RELOCATION*>(
-          data +
-          RvaToFileOffset( nt_headers, reloc_directory.VirtualAddress ) );
+  IMAGE_BASE_RELOCATION* reloc_block = reinterpret_cast<IMAGE_BASE_RELOCATION*>(
+      data + RvaToFileOffset( nt_headers, reloc_directory.VirtualAddress ) );
 
   DWORD relocation_size_read = 0;
 
@@ -464,8 +482,7 @@ void gwinmem::ProcessMemory::ManualMapper::RelocateImage(
     relocation_size_read += reloc_block->SizeOfBlock;
 
     reloc_block = reinterpret_cast<IMAGE_BASE_RELOCATION*>(
-        reinterpret_cast<size_t>( reloc_block ) +
-        reloc_block->SizeOfBlock );
+        reinterpret_cast<size_t>( reloc_block ) + reloc_block->SizeOfBlock );
   }
 }
 
