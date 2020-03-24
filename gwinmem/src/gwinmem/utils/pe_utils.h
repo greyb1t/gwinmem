@@ -4,6 +4,13 @@
 #include <stdint.h>
 #include <string>
 
+struct PdbInfo {
+  DWORD signature;
+  GUID guid;
+  DWORD age;
+  char pdb_filename[ 1 ];
+};
+
 namespace peutils {
 
 const IMAGE_NT_HEADERS* GetNtHeaders( const uint8_t* data );
@@ -72,5 +79,7 @@ const T GetExport( const uintptr_t module_base,
 
   return T();
 }
+
+PdbInfo* GetPdbInfoFromModule( const uintptr_t module_base );
 
 }  // namespace peutils

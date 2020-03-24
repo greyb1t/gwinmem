@@ -3,6 +3,7 @@
 #include "process_memory.h"
 #include "utils/string_utils.h"
 #include "utils/pe_utils.h"
+#include "utils/internal_win32_headers.h"
 
 #include <assert.h>
 
@@ -88,8 +89,15 @@ class ProcessMemoryInternal : public ProcessMemory {
   // true. The hook detours the code in ntdll.
   bool ManualMapFixExceptionHandling();
 
+  // LDR_DATA_TABLE_ENTRY* entry, needs one member valid, it is DllBase
+  bool ManualMapHandleStaticTlsData( LDR_DATA_TABLE_ENTRY* entry );
+
   // Unhooks NtQueryInformationProcess
   bool ManualMapResetExceptionHandling();
+
+  // LDR_DATA_TABLE_ENTRY* entry, needs to be the same as the one passed
+  // into the ManualMapHandleStaticTlsData function
+  bool ManualMapFreeStaticTlsData( LDR_DATA_TABLE_ENTRY* entry );
 
   void ManualMapStartFreeDllThread( const uintptr_t mapped_module_base );
 

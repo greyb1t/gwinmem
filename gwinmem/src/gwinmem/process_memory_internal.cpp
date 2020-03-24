@@ -1,7 +1,7 @@
 #include "pch.h"
 #include "process_memory_internal.h"
 #include "utils/string_utils.h"
-#include "utils/internal_win32_headers.h"
+#include "utils/pe_utils.h"
 
 #include "detours.h"
 
@@ -410,6 +410,163 @@ bool gwinmem::ProcessMemoryInternal::ManualMapFixExceptionHandling() {
   return true;
 }
 
+// uintptr_t GetFunctionAddressFromPdb();
+
+bool IsWindows8Point1OrGreaterBetter() {
+  const auto ntdll = LoadLibrary( TEXT( "ntdll.dll" ) );
+
+  using RtlGetVersion_t =
+      NTSTATUS( NTAPI* )( PRTL_OSVERSIONINFOW lpVersionInformation );
+
+  const auto RtlGetVersion = reinterpret_cast<RtlGetVersion_t>(
+      GetProcAddress( ntdll, "RtlGetVersion" ) );
+
+  OSVERSIONINFOW os_version_info;
+  os_version_info.dwOSVersionInfoSize = sizeof( os_version_info );
+
+  RtlGetVersion( &os_version_info );
+
+  if ( os_version_info.dwBuildNumber >= 9200 ) {
+    if ( os_version_info.dwMajorVersion == 6 ) {
+      if ( os_version_info.dwMinorVersion >= 3 ) {
+        return true;
+      }
+    }
+
+    return true;
+  }
+
+  return false;
+}
+
+uintptr_t GetFunctionRvaFromPdb( const HMODULE module,
+                                 const std::string& function_name ) {
+  const auto pdb_info =
+      peutils::GetPdbInfoFromModule( reinterpret_cast<uintptr_t>( module ) );
+
+  if ( !pdb_info )
+    return 0;
+
+  std::string pdb_path = std::string( pdb_info->pdb_filename ) + "/" +
+                         gwinmem::stringutils::GuidToString( pdb_info->guid ) +
+                         std::to_string( pdb_info->age ) + "/" +
+                         std::string( pdb_info->pdb_filename );
+
+  const auto symbol_server_url = "http://msdl.microsoft.com/download/symbols/";
+
+  std::string temp_directory_path( MAX_PATH, '\0' );
+
+  const auto chars_count_copied =
+      GetTempPathA( MAX_PATH, &temp_directory_path[ 0 ] );
+
+  assert( chars_count_copied );
+
+  temp_directory_path.resize( chars_count_copied );
+  temp_directory_path.append( "yeet_gb_fb_v2.pdb" );
+
+  const auto download_pdb_result =
+      URLDownloadToFileA( 0, ( symbol_server_url + pdb_path ).c_str(),
+                          temp_directory_path.c_str(), 0, NULL );
+
+  if ( download_pdb_result != S_OK ) {
+    return 0;
+  }
+
+  // Get better debugging error messages
+  // SymSetOptions( SymGetOptions() | SYMOPT_DEBUG );
+
+  if ( !SymInitialize( GetCurrentProcess(), NULL, FALSE ) ) {
+    return 0;
+  }
+
+  const auto pdb_file_handle =
+      CreateFileA( temp_directory_path.c_str(), GENERIC_READ, 0, NULL,
+                   OPEN_EXISTING, 0, NULL );
+
+  if ( !pdb_file_handle ) {
+    return 0;
+  }
+
+  const auto pdb_file_size = GetFileSize( pdb_file_handle, NULL );
+
+  // Close the handle before calling SymLoadModuleEx because it needs access to the file
+  //
+  CloseHandle( pdb_file_handle );
+
+  const uintptr_t kDummyBaseAddress = 0x10000000;
+
+  const auto mod_base_addr =
+      SymLoadModuleEx( GetCurrentProcess(), NULL, temp_directory_path.c_str(),
+                       NULL, kDummyBaseAddress, pdb_file_size, NULL, 0 );
+
+  if ( !mod_base_addr )
+    return 0;
+
+  // Workaround instead of defining SYMBOL_INFO as a variable, because their API design is ABSOLUTE SHIT
+  //
+  char sym_memory[ sizeof( SYMBOL_INFO ) + MAX_SYM_NAME ];
+  SYMBOL_INFO* sym_info = reinterpret_cast<SYMBOL_INFO*>( sym_memory );
+  {
+    sym_info->NameLen = MAX_SYM_NAME;
+    sym_info->SizeOfStruct = sizeof( SYMBOL_INFO );
+  }
+
+  if ( !SymFromName( GetCurrentProcess(), function_name.c_str(), sym_info ) )
+    return 0;
+
+  const auto unload_module_result =
+      SymUnloadModule64( GetCurrentProcess(), mod_base_addr );
+
+  assert( unload_module_result );
+
+  if ( !SymCleanup( GetCurrentProcess() ) )
+    return 0;
+
+  return static_cast<uintptr_t>( sym_info->Address - kDummyBaseAddress );
+}
+
+bool gwinmem::ProcessMemoryInternal::ManualMapHandleStaticTlsData(
+    LDR_DATA_TABLE_ENTRY* entry ) {
+  const auto ntdll = GetModuleHandle( TEXT( "ntdll.dll" ) );
+
+  assert( ntdll );
+
+  const auto ldrp_handle_tls_data_rva =
+      GetFunctionRvaFromPdb( ntdll, "LdrpHandleTlsData" );
+
+  if ( !ldrp_handle_tls_data_rva ) {
+    return false;
+  }
+
+  using LdrpHandleTlsData_stdcall_t =
+      NTSTATUS( __stdcall* )( PLDR_DATA_TABLE_ENTRY ModuleEntry );
+
+  using LdrpHandleTlsData_thiscall_t =
+      NTSTATUS( __thiscall* )( PLDR_DATA_TABLE_ENTRY ModuleEntry );
+
+  const auto ntdll_base_addr = reinterpret_cast<uintptr_t>( ntdll );
+
+  const auto ldrp_handle_tls_data_thiscall =
+      reinterpret_cast<LdrpHandleTlsData_thiscall_t>(
+          ntdll_base_addr + ldrp_handle_tls_data_rva );
+
+  const auto ldrp_handle_tls_data_stdcall =
+      reinterpret_cast<LdrpHandleTlsData_stdcall_t>( ntdll_base_addr +
+                                                     ldrp_handle_tls_data_rva );
+
+  NTSTATUS data_fix_result = 0;
+
+  // Ever since the windows 8.1 version, LdrpHandleTlsData has changed to a __thiscall
+  //
+  if ( IsWindows8Point1OrGreaterBetter() ) {
+    data_fix_result = ldrp_handle_tls_data_thiscall( entry );
+  } else {
+    data_fix_result = ldrp_handle_tls_data_stdcall( entry );
+  }
+
+  return NT_SUCCESS( data_fix_result );
+}
+
 bool gwinmem::ProcessMemoryInternal::ManualMapResetExceptionHandling() {
   DetourTransactionBegin();
 
@@ -438,6 +595,48 @@ bool gwinmem::ProcessMemoryInternal::ManualMapResetExceptionHandling() {
   */
 
   return true;
+}
+
+bool gwinmem::ProcessMemoryInternal::ManualMapFreeStaticTlsData(
+    LDR_DATA_TABLE_ENTRY* entry ) {
+  const auto ntdll = GetModuleHandle( TEXT( "ntdll.dll" ) );
+
+  assert( ntdll );
+
+  const auto ldrp_release_tls_entry_rva =
+      GetFunctionRvaFromPdb( ntdll, "LdrpReleaseTlsEntry" );
+
+  if ( !ldrp_release_tls_entry_rva ) {
+    return false;
+  }
+
+  using LdrpReleaseTlsEntry_stdcall =
+      NTSTATUS( __stdcall* )( PLDR_DATA_TABLE_ENTRY ModuleEntry, DWORD * unk );
+
+  using LdrpReleaseTlsEntry_fastcall =
+      NTSTATUS( __fastcall* )( PLDR_DATA_TABLE_ENTRY ModuleEntry, DWORD * unk );
+
+  const auto ntdll_base_addr = reinterpret_cast<uintptr_t>( ntdll );
+
+  const auto ldrp_release_tls_entry_fastcall =
+      reinterpret_cast<LdrpReleaseTlsEntry_fastcall>(
+          ntdll_base_addr + ldrp_release_tls_entry_rva );
+
+  const auto ldrp_release_tls_entry_stdcall =
+      reinterpret_cast<LdrpReleaseTlsEntry_stdcall>(
+          ntdll_base_addr + ldrp_release_tls_entry_rva );
+
+  NTSTATUS tls_free_result = 0;
+
+  // Ever since the windows 8.1 version, LdrpReleaseTlsEntry has changed to a __fastcall
+  //
+  if ( IsWindows8Point1OrGreaterBetter() ) {
+    tls_free_result = ldrp_release_tls_entry_fastcall( entry, 0 );
+  } else {
+    tls_free_result = ldrp_release_tls_entry_stdcall( entry, 0 );
+  }
+
+  return NT_SUCCESS( tls_free_result );
 }
 
 #pragma optimize( "", off )
