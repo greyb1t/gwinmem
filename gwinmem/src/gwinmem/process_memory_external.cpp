@@ -90,9 +90,6 @@ uintptr_t gwinmem::ProcessMemoryExternal::RemoteLoadLibrary(
   WriteBytes( dll_directory_addr, dll_dir_mem_size,
               reinterpret_cast<const uint8_t*>( &dll_directory[ 0 ] ) );
 
-  const auto kernel32_base_addr = GetModule( TEXT( "kernel32.dll" ) ).base;
-  assert( kernel32_base_addr );
-
   // Using this method, we assume that kernel32.dll is loaded into the target
   const SafeHandle thread_handle = CreateRemoteThread(
       process_handle_.GetValue(), nullptr, 0,
